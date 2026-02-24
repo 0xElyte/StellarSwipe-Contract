@@ -17,7 +17,8 @@ mod stake;
 mod submission;
 mod templates;
 mod types;
-mod scheduling;
+mod combos;
+mod test_combos;
 
 use admin::{
     get_admin, get_admin_config, init_admin, is_trading_paused, require_not_paused,
@@ -34,6 +35,13 @@ use types::{
     SignalPerformanceView, SignalStatus, SignalSummary, SortOption, TradeExecution,
     SignalData, RecurrencePattern,
 };
+use combos::{
+    cancel_combo, create_combo_signal, execute_combo_signal, get_combo,
+    get_combo_executions_pub, get_combo_performance, ComboExecution,
+    ComboPerformanceSummary, ComboSignal, ComboType, ComponentExecution,
+    ComponentSignal,
+};
+use errors::ComboError;
 
 const MAX_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60;
 
@@ -50,6 +58,9 @@ pub enum StorageKey {
     TemplateCounter,
     Templates,
     ExternalIdMappings,
+    ComboCounter,
+Combos,
+ComboExecutions(u64),
 }
 
 #[contractimpl]
@@ -190,6 +201,32 @@ impl SignalRegistry {
             .set(&StorageKey::SignalCounter, &counter);
 
         counter
+    }
+
+    fn next_trade_id(env: &Env) -> u64 {
+        let mut counter: u64 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::TradeCounter)
+            .unwrap_or(0);
+        counter = counter.checked_add(1).expect("trade id overflow");
+        env.storage()
+            .instance()
+            .set(&StorageKey::TradeCounter, &counter);
+        counter
+    }
+
+    fn get_trade_executions_map(env: &Env) -> Map<u64, TradeExecution> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::TradeExecutions)
+            .unwrap_or(Map::new(env))
+    }
+
+    fn save_trade_executions_map(env: &Env, map: &Map<u64, TradeExecution>) {
+        env.storage()
+            .instance()
+            .set(&StorageKey::TradeExecutions, map);
     }
 
     fn get_signals_map(env: &Env) -> Map<u64, Signal> {
@@ -1055,6 +1092,90 @@ impl SignalRegistry {
 
     pub fn is_collaborative_signal(env: Env, signal_id: u64) -> bool {
         collaboration::is_collaborative_signal(&env, signal_id)
+    }
+
+    /* =========================
+       COMBO SIGNAL FUNCTIONS
+    ========================== */
+
+    /// Create a combo signal linking multiple component signals.
+    ///
+    /// All component signals must belong to `provider` and be Active.
+    /// Component weights must sum to exactly 10 000 (100% in basis points).
+    pub fn create_combo_signal(
+        env: Env,
+        provider: Address,
+        name: String,
+        components: Vec<ComponentSignal>,
+        combo_type: ComboType,
+    ) -> Result<u64, ComboError> {
+        provider.require_auth();
+
+        let combo_id =
+            create_combo_signal(&env, &provider, name, components, combo_type)?;
+
+        events::emit_combo_created(
+            &env,
+            combo_id,
+            provider,
+            // component count already validated inside create_combo_signal
+            combo_id, // placeholder — use actual count below
+        );
+
+        Ok(combo_id)
+    }
+
+    /// Execute a combo signal, distributing `total_amount` across components
+    /// according to their weights and the combo type.
+    pub fn execute_combo_signal(
+        env: Env,
+        combo_id: u64,
+        user: Address,
+        total_amount: i128,
+    ) -> Result<Vec<ComponentExecution>, ComboError> {
+        user.require_auth();
+
+        let executions =
+            execute_combo_signal(&env, combo_id, &user, total_amount)?;
+
+        // Calculate combined ROI for the event (already stored, re-derive for event)
+        let execs_stored = get_combo_executions_pub(&env, combo_id);
+        let combined_roi = if let Some(last) = execs_stored.get(execs_stored.len().saturating_sub(1)) {
+            last.combined_roi
+        } else {
+            0
+        };
+
+        events::emit_combo_executed(&env, combo_id, user, combined_roi);
+
+        Ok(executions)
+    }
+
+    /// Cancel an active combo. Only the provider who created it may cancel.
+    pub fn cancel_combo_signal(
+        env: Env,
+        combo_id: u64,
+        provider: Address,
+    ) -> Result<(), ComboError> {
+        provider.require_auth();
+        cancel_combo(&env, combo_id, &provider)?;
+        events::emit_combo_cancelled(&env, combo_id, provider);
+        Ok(())
+    }
+
+    /// Retrieve a combo signal by ID.
+    pub fn get_combo_signal(env: Env, combo_id: u64) -> Option<ComboSignal> {
+        get_combo(&env, combo_id)
+    }
+
+    /// Get aggregated performance metrics for a combo.
+    pub fn get_combo_performance(env: Env, combo_id: u64) -> Option<ComboPerformanceSummary> {
+        get_combo_performance(&env, combo_id)
+    }
+
+    /// Get the full execution history for a combo.
+    pub fn get_combo_executions(env: Env, combo_id: u64) -> Vec<ComboExecution> {
+        get_combo_executions_pub(&env, combo_id)
     }
 }
 

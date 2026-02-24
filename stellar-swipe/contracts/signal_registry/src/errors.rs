@@ -91,3 +91,28 @@ pub enum CollaborationError {
     NotCollaborative = 503,
     PendingApproval = 504,
 }
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+ feat/signal-export
+pub enum ExportError {
+    UnsupportedFormat = 700,
+    NoDataInRange = 701,
+    ExportTooLarge = 702,
+=======
+pub enum ComboError {
+    ComboNotFound = 600,
+    SignalNotFound = 601,
+    NotSignalOwner = 602,
+    InvalidWeights = 603,
+    WeightOverflow = 604,
+    NoComponents = 605,
+    TooManyComponents = 606,
+    SignalNotActive = 607,
+    ComponentSignalExpired = 608,
+    InvalidConditionReference = 609,
+    ComboNotActive = 610,
+    InvalidAmount = 611,
+ main
+}
