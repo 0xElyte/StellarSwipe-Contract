@@ -1,12 +1,16 @@
-use soroban_sdk::{Env, Address, Vec, panic_with_error};
-use common::{Asset, AssetPair};
+use soroban_sdk::{contracttype, Env, Address, Vec, panic_with_error};
+use stellar_swipe_common::{Asset, AssetPair};
 use crate::errors::OracleError;
 
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct OrderEntry {
     pub price: i128,
     pub amount: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct OrderBook {
     pub bids: Vec<OrderEntry>,
     pub asks: Vec<OrderEntry>,

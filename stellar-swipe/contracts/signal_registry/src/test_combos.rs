@@ -3,18 +3,18 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env, String, Vec};
+use soroban_sdk::{testutils::Address as _, testutils::Ledger, Env, String, Vec, vec};
 
 use crate::combos::{
-    ComboStatus, ComboType, Condition, ConditionType, ComponentSignal,
+    ComboStatus, ComboType, Condition, ConditionType, ComponentSignal, ConditionGate,
 };
+use crate::categories::{SignalCategory, RiskLevel};
 
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
 
-fn setup() -> (Env, Address, SignalRegistryClient) {
-    let env = Env::default();
+fn setup<'a>(env: &'a Env) -> (Address, SignalRegistryClient<'a>) {
     env.mock_all_auths();
     env.ledger().set_timestamp(10_000);
 
@@ -25,7 +25,7 @@ fn setup() -> (Env, Address, SignalRegistryClient) {
     let admin = Address::generate(&env);
     client.initialize(&admin);
 
-    (env, admin, client)
+    (admin, client)
 }
 
 fn make_signal(env: &Env, client: &SignalRegistryClient, provider: &Address) -> u64 {
@@ -37,6 +37,9 @@ fn make_signal(env: &Env, client: &SignalRegistryClient, provider: &Address) -> 
         &100_000,
         &String::from_str(env, "Bullish"),
         &expiry,
+        &SignalCategory::SwingTrade,
+        &vec![env, String::from_str(env, "test")],
+        &RiskLevel::Medium,
     )
 }
 
@@ -49,6 +52,9 @@ fn make_sell_signal(env: &Env, client: &SignalRegistryClient, provider: &Address
         &4_500_000,
         &String::from_str(env, "Bearish BTC"),
         &expiry,
+        &SignalCategory::DayTrade,
+        &vec![env, String::from_str(env, "crypto")],
+        &RiskLevel::High,
     )
 }
 
@@ -57,12 +63,12 @@ fn two_component_50_50(env: &Env, sig1: u64, sig2: u64) -> Vec<ComponentSignal> 
     comps.push_back(ComponentSignal {
         signal_id: sig1,
         weight: 5000,
-        condition: None,
+        condition: ConditionGate::None,
     });
     comps.push_back(ComponentSignal {
         signal_id: sig2,
         weight: 5000,
-        condition: None,
+        condition: ConditionGate::None,
     });
     comps
 }
@@ -73,7 +79,8 @@ fn two_component_50_50(env: &Env, sig1: u64, sig2: u64) -> Vec<ComponentSignal> 
 
 #[test]
 fn test_create_simultaneous_combo() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
     let sig2 = make_sell_signal(&env, &client, &provider);
@@ -85,8 +92,7 @@ fn test_create_simultaneous_combo() {
             &String::from_str(&env, "BTC-XLM Pairs Trade"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
     assert_eq!(combo_id, 1);
 
@@ -98,17 +104,18 @@ fn test_create_simultaneous_combo() {
 
 #[test]
 fn test_create_sequential_combo() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
     let sig2 = make_signal(&env, &client, &provider);
 
     let mut comps = Vec::new(&env);
-    comps.push_back(ComponentSignal { signal_id: sig1, weight: 3333, condition: None });
-    comps.push_back(ComponentSignal { signal_id: sig2, weight: 3333, condition: None });
+    comps.push_back(ComponentSignal { signal_id: sig1, weight: 3333, condition: ConditionGate::None });
+    comps.push_back(ComponentSignal { signal_id: sig2, weight: 3333, condition: ConditionGate::None });
     // 3334 to make sum exactly 10000
     let sig3 = make_signal(&env, &client, &provider);
-    comps.push_back(ComponentSignal { signal_id: sig3, weight: 3334, condition: None });
+    comps.push_back(ComponentSignal { signal_id: sig3, weight: 3334, condition: ConditionGate::None });
 
     let combo_id = client
         .create_combo_signal(
@@ -116,8 +123,7 @@ fn test_create_sequential_combo() {
             &String::from_str(&env, "Ladder Entry"),
             &comps,
             &ComboType::Sequential,
-        )
-        .unwrap();
+        );
 
     let combo = client.get_combo_signal(&combo_id).unwrap();
     assert_eq!(combo.component_signals.len(), 3);
@@ -126,7 +132,8 @@ fn test_create_sequential_combo() {
 
 #[test]
 fn test_create_conditional_combo() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
     let sig2 = make_signal(&env, &client, &provider);
@@ -135,12 +142,12 @@ fn test_create_conditional_combo() {
     comps.push_back(ComponentSignal {
         signal_id: sig1,
         weight: 5000,
-        condition: None, // first signal has no condition
+        condition: ConditionGate::None, // first signal has no condition
     });
     comps.push_back(ComponentSignal {
         signal_id: sig2,
         weight: 5000,
-        condition: Some(Condition {
+        condition: ConditionGate::Some(Condition {
             depends_on: sig1,
             condition_type: ConditionType::Success,
         }),
@@ -152,22 +159,22 @@ fn test_create_conditional_combo() {
             &String::from_str(&env, "Buy XLM + conditional follow-up"),
             &comps,
             &ComboType::Conditional,
-        )
-        .unwrap();
+        );
 
     assert!(combo_id > 0);
 }
 
 #[test]
 fn test_create_combo_invalid_weights_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
     let sig2 = make_signal(&env, &client, &provider);
 
     let mut comps = Vec::new(&env);
-    comps.push_back(ComponentSignal { signal_id: sig1, weight: 4000, condition: None });
-    comps.push_back(ComponentSignal { signal_id: sig2, weight: 4000, condition: None });
+    comps.push_back(ComponentSignal { signal_id: sig1, weight: 4000, condition: ConditionGate::None });
+    comps.push_back(ComponentSignal { signal_id: sig2, weight: 4000, condition: ConditionGate::None });
     // total = 8000, not 10000
 
     let result = client.try_create_combo_signal(
@@ -181,7 +188,8 @@ fn test_create_combo_invalid_weights_fails() {
 
 #[test]
 fn test_create_combo_not_signal_owner_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let attacker = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
@@ -201,13 +209,14 @@ fn test_create_combo_not_signal_owner_fails() {
 
 #[test]
 fn test_create_combo_signal_not_found_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
 
     let mut comps = Vec::new(&env);
-    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: None });
-    comps.push_back(ComponentSignal { signal_id: 999, weight: 5000, condition: None }); // non-existent
+    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: ConditionGate::None });
+    comps.push_back(ComponentSignal { signal_id: 999, weight: 5000, condition: ConditionGate::None }); // non-existent
 
     let result = client.try_create_combo_signal(
         &provider,
@@ -220,7 +229,8 @@ fn test_create_combo_signal_not_found_fails() {
 
 #[test]
 fn test_create_combo_no_components_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let comps: Vec<ComponentSignal> = Vec::new(&env);
 
@@ -235,17 +245,18 @@ fn test_create_combo_no_components_fails() {
 
 #[test]
 fn test_create_combo_invalid_condition_reference_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
     let sig2 = make_signal(&env, &client, &provider);
 
     let mut comps = Vec::new(&env);
-    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: None });
+    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: ConditionGate::None });
     comps.push_back(ComponentSignal {
         signal_id: sig2,
         weight: 5000,
-        condition: Some(Condition {
+        condition: ConditionGate::Some(Condition {
             depends_on: 999, // references a signal NOT in the combo
             condition_type: ConditionType::Success,
         }),
@@ -266,7 +277,8 @@ fn test_create_combo_invalid_condition_reference_fails() {
 
 #[test]
 fn test_execute_simultaneous_combo() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -280,12 +292,10 @@ fn test_execute_simultaneous_combo() {
             &String::from_str(&env, "Pairs Trade"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
     let executions = client
-        .execute_combo_signal(&combo_id, &user, &1_000_000)
-        .unwrap();
+        .execute_combo_signal(&combo_id, &user, &1_000_000);
 
     assert_eq!(executions.len(), 2);
 
@@ -300,7 +310,8 @@ fn test_execute_simultaneous_combo() {
 
 #[test]
 fn test_execute_sequential_combo() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -309,9 +320,9 @@ fn test_execute_sequential_combo() {
     let sig3 = make_signal(&env, &client, &provider);
 
     let mut comps = Vec::new(&env);
-    comps.push_back(ComponentSignal { signal_id: sig1, weight: 3333, condition: None });
-    comps.push_back(ComponentSignal { signal_id: sig2, weight: 3333, condition: None });
-    comps.push_back(ComponentSignal { signal_id: sig3, weight: 3334, condition: None });
+    comps.push_back(ComponentSignal { signal_id: sig1, weight: 3333, condition: ConditionGate::None });
+    comps.push_back(ComponentSignal { signal_id: sig2, weight: 3333, condition: ConditionGate::None });
+    comps.push_back(ComponentSignal { signal_id: sig3, weight: 3334, condition: ConditionGate::None });
 
     let combo_id = client
         .create_combo_signal(
@@ -319,12 +330,10 @@ fn test_execute_sequential_combo() {
             &String::from_str(&env, "Ladder"),
             &comps,
             &ComboType::Sequential,
-        )
-        .unwrap();
+        );
 
     let executions = client
-        .execute_combo_signal(&combo_id, &user, &3_000_000)
-        .unwrap();
+        .execute_combo_signal(&combo_id, &user, &3_000_000);
 
     assert_eq!(executions.len(), 3);
     for i in 0..3u32 {
@@ -334,7 +343,8 @@ fn test_execute_sequential_combo() {
 
 #[test]
 fn test_execute_conditional_combo_condition_met() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -346,11 +356,11 @@ fn test_execute_conditional_combo_condition_met() {
     // sig1 now has avg_roi = 1000 bps (10%)
 
     let mut comps = Vec::new(&env);
-    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: None });
+    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: ConditionGate::None });
     comps.push_back(ComponentSignal {
         signal_id: sig2,
         weight: 5000,
-        condition: Some(Condition {
+        condition: ConditionGate::Some(Condition {
             depends_on: sig1,
             condition_type: ConditionType::Success,
         }),
@@ -362,12 +372,10 @@ fn test_execute_conditional_combo_condition_met() {
             &String::from_str(&env, "Conditional Success"),
             &comps,
             &ComboType::Conditional,
-        )
-        .unwrap();
+        );
 
     let executions = client
-        .execute_combo_signal(&combo_id, &user, &1_000_000)
-        .unwrap();
+        .execute_combo_signal(&combo_id, &user, &1_000_000);
 
     // sig1 executes and has positive ROI from simulate_trade_roi
     // sig2 condition (Success on sig1) is evaluated against sig1's execution in this combo
@@ -382,7 +390,8 @@ fn test_execute_conditional_combo_condition_met() {
 
 #[test]
 fn test_execute_conditional_combo_condition_not_met() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -393,11 +402,11 @@ fn test_execute_conditional_combo_condition_not_met() {
     // Condition: Success (roi > 0) → NOT met
 
     let mut comps = Vec::new(&env);
-    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: None });
+    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: ConditionGate::None });
     comps.push_back(ComponentSignal {
         signal_id: sig2,
         weight: 5000,
-        condition: Some(Condition {
+        condition: ConditionGate::Some(Condition {
             depends_on: sig1,
             condition_type: ConditionType::Success,
         }),
@@ -409,12 +418,10 @@ fn test_execute_conditional_combo_condition_not_met() {
             &String::from_str(&env, "Conditional Fail"),
             &comps,
             &ComboType::Conditional,
-        )
-        .unwrap();
+        );
 
     let executions = client
-        .execute_combo_signal(&combo_id, &user, &1_000_000)
-        .unwrap();
+        .execute_combo_signal(&combo_id, &user, &1_000_000);
 
     assert_eq!(executions.len(), 2);
     assert!(!executions.get(0).unwrap().skipped); // sig1 always runs
@@ -423,7 +430,8 @@ fn test_execute_conditional_combo_condition_not_met() {
 
 #[test]
 fn test_execute_conditional_roi_above_threshold() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -434,11 +442,11 @@ fn test_execute_conditional_roi_above_threshold() {
     client.record_trade_execution(&user, &sig1, &100_000, &105_000, &1_000_000);
 
     let mut comps = Vec::new(&env);
-    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: None });
+    comps.push_back(ComponentSignal { signal_id: sig1, weight: 5000, condition: ConditionGate::None });
     comps.push_back(ComponentSignal {
         signal_id: sig2,
         weight: 5000,
-        condition: Some(Condition {
+        condition: ConditionGate::Some(Condition {
             depends_on: sig1,
             condition_type: ConditionType::RoiAbove(200), // threshold 200 bps
         }),
@@ -450,12 +458,10 @@ fn test_execute_conditional_roi_above_threshold() {
             &String::from_str(&env, "ROI Threshold"),
             &comps,
             &ComboType::Conditional,
-        )
-        .unwrap();
+        );
 
     let executions = client
-        .execute_combo_signal(&combo_id, &user, &1_000_000)
-        .unwrap();
+        .execute_combo_signal(&combo_id, &user, &1_000_000);
 
     // sig1's ROI (500 bps) > threshold (200 bps) → sig2 executes
     assert!(!executions.get(1).unwrap().skipped);
@@ -463,7 +469,8 @@ fn test_execute_conditional_roi_above_threshold() {
 
 #[test]
 fn test_execute_combo_expired_signal_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -477,8 +484,7 @@ fn test_execute_combo_expired_signal_fails() {
             &String::from_str(&env, "Will expire"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
     // Advance past signal expiry
     env.ledger().set_timestamp(10_000 + 7200);
@@ -489,7 +495,8 @@ fn test_execute_combo_expired_signal_fails() {
 
 #[test]
 fn test_execute_cancelled_combo_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -503,10 +510,9 @@ fn test_execute_cancelled_combo_fails() {
             &String::from_str(&env, "To cancel"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
-    client.cancel_combo_signal(&combo_id, &provider).unwrap();
+    client.cancel_combo_signal(&combo_id, &provider);
 
     let result = client.try_execute_combo_signal(&combo_id, &user, &1_000_000);
     assert!(result.is_err());
@@ -518,7 +524,8 @@ fn test_execute_cancelled_combo_fails() {
 
 #[test]
 fn test_cancel_combo_success() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
     let sig2 = make_signal(&env, &client, &provider);
@@ -530,10 +537,9 @@ fn test_cancel_combo_success() {
             &String::from_str(&env, "Cancel me"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
-    client.cancel_combo_signal(&combo_id, &provider).unwrap();
+    client.cancel_combo_signal(&combo_id, &provider);
 
     let combo = client.get_combo_signal(&combo_id).unwrap();
     assert!(matches!(combo.status, ComboStatus::Cancelled));
@@ -541,7 +547,8 @@ fn test_cancel_combo_success() {
 
 #[test]
 fn test_cancel_combo_wrong_provider_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let attacker = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
@@ -554,8 +561,7 @@ fn test_cancel_combo_wrong_provider_fails() {
             &String::from_str(&env, "Mine"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
     let result = client.try_cancel_combo_signal(&combo_id, &attacker);
     assert!(result.is_err());
@@ -563,7 +569,8 @@ fn test_cancel_combo_wrong_provider_fails() {
 
 #[test]
 fn test_cancel_combo_twice_fails() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
     let sig2 = make_signal(&env, &client, &provider);
@@ -575,10 +582,9 @@ fn test_cancel_combo_twice_fails() {
             &String::from_str(&env, "Double cancel"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
-    client.cancel_combo_signal(&combo_id, &provider).unwrap();
+    client.cancel_combo_signal(&combo_id, &provider);
     let result = client.try_cancel_combo_signal(&combo_id, &provider);
     assert!(result.is_err());
 }
@@ -589,7 +595,8 @@ fn test_cancel_combo_twice_fails() {
 
 #[test]
 fn test_combo_performance_no_executions() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let sig1 = make_signal(&env, &client, &provider);
     let sig2 = make_signal(&env, &client, &provider);
@@ -601,8 +608,7 @@ fn test_combo_performance_no_executions() {
             &String::from_str(&env, "Perf test"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
     let perf = client.get_combo_performance(&combo_id).unwrap();
     assert_eq!(perf.total_executions, 0);
@@ -612,7 +618,8 @@ fn test_combo_performance_no_executions() {
 
 #[test]
 fn test_combo_performance_after_execution() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -626,12 +633,10 @@ fn test_combo_performance_after_execution() {
             &String::from_str(&env, "Perf after exec"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
     client
-        .execute_combo_signal(&combo_id, &user, &2_000_000)
-        .unwrap();
+        .execute_combo_signal(&combo_id, &user, &2_000_000);
 
     let perf = client.get_combo_performance(&combo_id).unwrap();
     assert_eq!(perf.total_executions, 1);
@@ -640,7 +645,8 @@ fn test_combo_performance_after_execution() {
 
 #[test]
 fn test_combo_execution_history_recorded() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -654,11 +660,10 @@ fn test_combo_execution_history_recorded() {
             &String::from_str(&env, "History test"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
-    client.execute_combo_signal(&combo_id, &user, &1_000_000).unwrap();
-    client.execute_combo_signal(&combo_id, &user, &2_000_000).unwrap();
+    client.execute_combo_signal(&combo_id, &user, &1_000_000);
+    client.execute_combo_signal(&combo_id, &user, &2_000_000);
 
     let history = client.get_combo_executions(&combo_id);
     assert_eq!(history.len(), 2);
@@ -672,7 +677,8 @@ fn test_combo_execution_history_recorded() {
 
 #[test]
 fn test_full_pairs_trade_workflow() {
-    let (env, _admin, client) = setup();
+    let env = Env::default();
+    let (_admin, client) = setup(&env);
     let provider = Address::generate(&env);
     let user = Address::generate(&env);
 
@@ -687,13 +693,11 @@ fn test_full_pairs_trade_workflow() {
             &String::from_str(&env, "Long XLM / Short BTC"),
             &comps,
             &ComboType::Simultaneous,
-        )
-        .unwrap();
+        );
 
     // Execute combo with 10,000 USDC
     let executions = client
-        .execute_combo_signal(&combo_id, &user, &10_000_000)
-        .unwrap();
+        .execute_combo_signal(&combo_id, &user, &10_000_000);
 
     assert_eq!(executions.len(), 2);
     assert_eq!(executions.get(0).unwrap().amount, 5_000_000); // 50%

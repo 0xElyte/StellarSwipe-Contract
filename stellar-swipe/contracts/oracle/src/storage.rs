@@ -1,7 +1,7 @@
 //! Oracle storage layer
 
 use soroban_sdk::{contracttype, Env, Map};
-use common::{Asset, AssetPair};
+use stellar_swipe_common::{Asset, AssetPair};
 use crate::errors::OracleError;
 
 const DAY_IN_LEDGERS: u32 = 17280; // ~24 hours

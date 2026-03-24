@@ -13,6 +13,7 @@ mod import;
 mod leaderboard;
 mod performance;
 mod query;
+mod scheduling;
 mod social;
 mod stake;
 mod submission;
@@ -23,9 +24,10 @@ mod test_combos;
 mod versioning;
 
 use admin::{
-    get_admin, get_admin_config, init_admin, is_trading_paused, require_not_paused,
-    AdminConfig, PauseInfo,
+    get_admin, get_admin_config, init_admin, is_trading_paused, require_not_paused_legacy as require_not_paused,
+    AdminConfig,
 };
+use stellar_swipe_common::emergency::{PauseState, CAT_SIGNALS, CAT_TRADING, CAT_STAKES, CAT_ALL};
 use categories::{RiskLevel, SignalCategory};
 use errors::{AdminError, TemplateError, ContestError, VersioningError};
 pub use leaderboard::{get_leaderboard as get_leaderboard_internal, LeaderboardMetric, ProviderLeaderboard};
@@ -61,12 +63,13 @@ pub enum StorageKey {
     Signals,
     ProviderStats,
     TradeExecutions,
+    TradeCounter,
     TemplateCounter,
     Templates,
     ExternalIdMappings,
     ComboCounter,
-Combos,
-ComboExecutions(u64),
+    Combos,
+    ComboExecutions(u64),
 }
 
 #[contractimpl]
@@ -109,6 +112,24 @@ impl SignalRegistry {
         admin::unpause_trading(&env, &caller)
     }
 
+    pub fn pause_category(
+        env: Env,
+        caller: Address,
+        category: String,
+        duration: Option<u64>,
+        reason: String,
+    ) -> Result<(), AdminError> {
+        admin::pause_category(&env, &caller, category, duration, reason)
+    }
+
+    pub fn unpause_category(env: Env, caller: Address, category: String) -> Result<(), AdminError> {
+        admin::unpause_category(&env, &caller, category)
+    }
+
+    pub fn get_pause_states(env: Env) -> Map<String, PauseState> {
+        admin::get_pause_states(&env)
+    }
+
     pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) -> Result<(), AdminError> {
         admin::transfer_admin(&env, &caller, new_admin)
     }
@@ -139,11 +160,31 @@ impl SignalRegistry {
         get_admin_config(&env)
     }
 
+    pub fn set_circuit_breaker_config(
+        env: Env,
+        caller: Address,
+        config: stellar_swipe_common::emergency::CircuitBreakerConfig,
+    ) -> Result<(), AdminError> {
+        admin::set_circuit_breaker_config(&env, &caller, config)
+    }
+
+    pub fn get_circuit_breaker_config(
+        env: Env,
+    ) -> Option<stellar_swipe_common::emergency::CircuitBreakerConfig> {
+        admin::get_circuit_breaker_config(&env)
+    }
+
+    pub fn get_circuit_breaker_stats(
+        env: Env,
+    ) -> stellar_swipe_common::emergency::CircuitBreakerStats {
+        admin::get_circuit_breaker_stats(&env)
+    }
+
     pub fn is_paused(env: Env) -> bool {
         is_trading_paused(&env)
     }
 
-    pub fn get_pause_info(env: Env) -> PauseInfo {
+    pub fn get_pause_info(env: Env) -> PauseState {
         admin::get_pause_info(&env)
     }
 
@@ -300,8 +341,8 @@ impl SignalRegistry {
         tags: Vec<String>,
         risk_level: RiskLevel,
     ) -> Result<u64, AdminError> {
-        // Check if trading is paused
-        require_not_paused(env)?;
+        // Check if signals are paused
+        admin::require_not_paused(env, String::from_str(env, CAT_SIGNALS))?;
 
         Self::validate_asset_pair(env, &asset_pair)?;
         
@@ -506,6 +547,11 @@ impl SignalRegistry {
         exit_price: i128,
         volume: i128,
     ) -> Result<(), errors::PerformanceError> {
+        // Check if trading is paused
+        if admin::is_category_paused(&env, String::from_str(&env, CAT_TRADING)) {
+            return Err(errors::PerformanceError::TradingPaused);
+        }
+
         // Require executor authorization
         executor.require_auth();
 
@@ -1121,14 +1167,14 @@ impl SignalRegistry {
         provider.require_auth();
 
         let combo_id =
-            create_combo_signal(&env, &provider, name, components, combo_type)?;
+            create_combo_signal(&env, &provider, name, components.clone(), combo_type)?;
 
         events::emit_combo_created(
             &env,
             combo_id,
             provider,
             // component count already validated inside create_combo_signal
-            combo_id, // placeholder — use actual count below
+            components.len(),
         );
 
         Ok(combo_id)
@@ -1203,7 +1249,11 @@ impl SignalRegistry {
         prize_pool: i128,
     ) -> Result<u64, ContestError> {
         admin.require_auth();
-        require_not_paused(&env)?;
+        require_not_paused(&env).map_err(|e| match e {
+            AdminError::TradingPaused => ContestError::TradingPaused,
+            AdminError::CircuitBreakerTriggered => ContestError::CircuitBreakerTriggered,
+            _ => ContestError::ContestNotFound,
+        })?;
         contests::create_contest(&env, name, start_time, end_time, metric, min_signals, prize_pool)
     }
 
@@ -1303,3 +1353,4 @@ mod test_collaboration; */
 mod test_scheduling;
 mod test_contests;
 mod test_versioning;
+mod test_emergency;

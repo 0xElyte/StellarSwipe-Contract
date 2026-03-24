@@ -1,5 +1,5 @@
 use soroban_sdk::{Address, Env, Vec, crypto::Ed25519Signature, xdr::ToXdr};
-use common::{AssetPair};
+use stellar_swipe_common::AssetPair;
 use crate::errors::OracleError;
 use crate::reputation::{get_oracle_stats, slash_oracle, SlashReason};
 use crate::types::ExternalPrice;

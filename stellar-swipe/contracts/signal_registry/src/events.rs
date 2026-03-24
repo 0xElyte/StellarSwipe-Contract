@@ -1,5 +1,5 @@
 use crate::types::Asset;
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, Env, Symbol, String, Vec};
 
 pub fn emit_admin_transferred(env: &Env, old_admin: Address, new_admin: Address) {
     let topics = (Symbol::new(env, "admin_transferred"), old_admin, new_admin);
@@ -151,4 +151,19 @@ pub fn emit_signal_updated(env: &Env, signal_id: u64, version: u32, updater: Add
 pub fn emit_copy_recorded(env: &Env, user: Address, signal_id: u64, version: u32) {
     let topics = (Symbol::new(env, "copy_recorded"), signal_id, user);
     env.events().publish(topics, version);
+}
+
+pub fn emit_emergency_paused(env: &Env, category: String, paused_by: Address, reason: String, auto_unpause_at: Option<u64>) {
+    let topics = (Symbol::new(env, "emergency_paused"), category, paused_by);
+    env.events().publish(topics, (reason, auto_unpause_at));
+}
+
+pub fn emit_emergency_unpaused(env: &Env, category: String, unpaused_by: Address) {
+    let topics = (Symbol::new(env, "emergency_unpaused"), category, unpaused_by);
+    env.events().publish(topics, ());
+}
+
+pub fn emit_circuit_breaker_triggered(env: &Env, category: String, reason: String) {
+    let topics = (Symbol::new(env, "circuit_breaker_triggered"), category);
+    env.events().publish(topics, reason);
 }

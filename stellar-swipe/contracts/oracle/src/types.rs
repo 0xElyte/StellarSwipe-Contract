@@ -1,5 +1,5 @@
-use soroban_sdk::{contracttype, Address, Vec, Env, crypto::Ed25519Signature};
-use common::{AssetPair};
+use soroban_sdk::{contracttype, Address, Vec, Env, Bytes, crypto::Ed25519Signature};
+use stellar_swipe_common::{AssetPair};
 use crate::errors::OracleError;
     
 
@@ -23,6 +23,16 @@ pub struct PriceSubmission {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct PriceData {
+    pub asset_pair: AssetPair,
+    pub price: i128,
+    pub timestamp: u64,
+    pub source: Address,
+    pub confidence: u32,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub enum StorageKey {
     Admin,
@@ -31,6 +41,8 @@ pub enum StorageKey {
     Oracles,
     PriceSubmissions,
     ConsensusPrice,
+    PauseStates,
+    OracleWeight(Address),
 }
 
 #[contracttype]
@@ -48,6 +60,6 @@ pub struct ExternalPrice {
     pub price: i128,
     pub timestamp: u64,
     pub round_id: u64,
-    pub signature: Vec<u8>, 
+    pub signature: Bytes, 
     pub oracle_address: Address,
 }
