@@ -21,6 +21,7 @@ pub enum AdminError {
     ScheduleLimitReached = 18,
     ScheduleNotFound = 19,
     NotScheduleOwner = 20,
+    CircuitBreakerTriggered = 21,
 }
 
 #[contracterror]
@@ -51,6 +52,7 @@ pub enum PerformanceError {
     InvalidVolume = 203,
     SignalExpired = 204,
     NoExecutions = 205,
+    TradingPaused = 206,
 }
 
 #[contracterror]
@@ -117,6 +119,8 @@ pub enum ComboError {
     InvalidConditionReference = 609,
     ComboNotActive = 610,
     InvalidAmount = 611,
+    TradingPaused = 612,
+    CircuitBreakerTriggered = 613,
 }
 
 #[contracterror]
@@ -129,6 +133,8 @@ pub enum ContestError {
     ContestNotEnded = 803,
     AlreadyFinalized = 804,
     NotQualified = 805,
+    TradingPaused = 806,
+    CircuitBreakerTriggered = 807,
 }
 
 #[contracterror]

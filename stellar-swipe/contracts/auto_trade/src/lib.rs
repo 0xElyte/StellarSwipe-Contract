@@ -1,7 +1,12 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, String, Vec};
+ feature/emergency-pause-circuit-breaker
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, String};
 
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, String, Vec};
+ main
+
+mod admin;
 mod auth;
 mod errors;
 mod history;
@@ -15,7 +20,10 @@ mod strategies;
 
 use crate::storage::DataKey;
 use errors::AutoTradeError;
-use risk_parity::{AssetRisk, RebalanceTrade};
+ feature/emergency-pause-circuit-breaker
+use stellar_swipe_common::emergency::{CAT_TRADING, PauseState};
+
+use risk_parity::{AssetRisk, RebalanceTrade}; main
 
 /// ==========================
 /// Types
@@ -68,6 +76,41 @@ pub struct AutoTradeContract;
 
 #[contractimpl]
 impl AutoTradeContract {
+    /// Initialize the contract with an admin
+    pub fn initialize(env: Env, admin: Address) {
+        admin::init_admin(&env, admin);
+    }
+
+    /// Pause a category (admin only)
+    pub fn pause_category(
+        env: Env,
+        caller: Address,
+        category: String,
+        duration: Option<u64>,
+        reason: String,
+    ) -> Result<(), AutoTradeError> {
+        admin::pause_category(&env, &caller, category, duration, reason)
+    }
+
+    /// Unpause a category (admin only)
+    pub fn unpause_category(env: Env, caller: Address, category: String) -> Result<(), AutoTradeError> {
+        admin::unpause_category(&env, &caller, category)
+    }
+
+    /// Get current pause states
+    pub fn get_pause_states(env: Env) -> soroban_sdk::Map<String, PauseState> {
+        admin::get_pause_states(&env)
+    }
+
+    /// Set circuit breaker configuration (admin only)
+    pub fn set_circuit_breaker_config(
+        env: Env,
+        caller: Address,
+        config: stellar_swipe_common::emergency::CircuitBreakerConfig,
+    ) -> Result<(), AutoTradeError> {
+        admin::set_cb_config(&env, &caller, config)
+    }
+
     /// Execute a trade on behalf of a user based on a signal
     pub fn execute_trade(
         env: Env,
@@ -76,6 +119,11 @@ impl AutoTradeContract {
         order_type: OrderType,
         amount: i128,
     ) -> Result<TradeResult, AutoTradeError> {
+        // Check if trading is paused
+        if admin::is_paused(&env, String::from_str(&env, CAT_TRADING)) {
+            return Err(AutoTradeError::TradingPaused);
+        }
+
         if amount <= 0 {
             return Err(AutoTradeError::InvalidAmount);
         }
@@ -137,6 +185,14 @@ impl AutoTradeContract {
         } else {
             TradeStatus::Filled
         };
+
+        // Update circuit breaker stats
+        admin::update_cb_stats(
+            &env,
+            status == TradeStatus::Failed,
+            execution.executed_amount,
+            execution.executed_price,
+        );
 
         let trade = Trade {
             signal_id,
