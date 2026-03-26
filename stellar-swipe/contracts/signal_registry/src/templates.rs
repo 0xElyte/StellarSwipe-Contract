@@ -48,7 +48,9 @@ pub fn get_templates_map(env: &Env) -> Map<u64, SignalTemplate> {
 pub fn store_template(env: &Env, template_id: u64, template: &SignalTemplate) {
     let mut templates = get_templates_map(env);
     templates.set(template_id, template.clone());
-    env.storage().instance().set(&StorageKey::Templates, &templates);
+    env.storage()
+        .instance()
+        .set(&StorageKey::Templates, &templates);
 }
 
 pub fn get_template(env: &Env, template_id: u64) -> Option<SignalTemplate> {
@@ -66,7 +68,9 @@ pub fn increment_template_use_count(env: &Env, template_id: u64) -> Result<(), T
         .checked_add(1)
         .ok_or(TemplateError::InvalidTemplate)?;
     templates.set(template_id, template);
-    env.storage().instance().set(&StorageKey::Templates, &templates);
+    env.storage()
+        .instance()
+        .set(&StorageKey::Templates, &templates);
     Ok(())
 }
 
@@ -85,7 +89,9 @@ pub fn set_template_visibility(
     }
     template.is_public = is_public;
     templates.set(template_id, template);
-    env.storage().instance().set(&StorageKey::Templates, &templates);
+    env.storage()
+        .instance()
+        .set(&StorageKey::Templates, &templates);
     Ok(())
 }
 
@@ -112,7 +118,8 @@ pub fn replace_variables(
                 continue;
             }
 
-            let key = str::from_utf8(&bytes[(i + 1)..j]).map_err(|_| TemplateError::InvalidTemplate)?;
+            let key =
+                str::from_utf8(&bytes[(i + 1)..j]).map_err(|_| TemplateError::InvalidTemplate)?;
             if key.is_empty() {
                 return Err(TemplateError::InvalidTemplate);
             }

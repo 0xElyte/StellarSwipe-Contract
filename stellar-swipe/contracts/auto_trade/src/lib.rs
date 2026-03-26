@@ -1,19 +1,35 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 
+mod admin;
+mod advanced_risk;
 mod auth;
 mod errors;
 mod history;
+mod iceberg;
 mod multi_asset;
 mod portfolio;
+mod portfolio_insurance;
+mod referral;
 mod risk;
+mod risk_parity;
 mod sdex;
 mod storage;
 mod strategies;
 
 use crate::storage::DataKey;
+use advanced_risk::AutoSellResult;
 use errors::AutoTradeError;
+use stellar_swipe_common::emergency::{CAT_TRADING, PauseState};
+
+use risk_parity::{AssetRisk, RebalanceTrade};
+
+pub use iceberg::{
+    create_iceberg_order, cancel_iceberg_order, get_full_order_view, get_public_order_view,
+    get_user_orders, on_sdex_fill, update_iceberg_price, AssetPair, CancellationInfo,
+    FullOrderView, IcebergOrder, OrderSide, OrderStatus, PublicOrderView,
+};
 
 /// ==========================
 /// Types
@@ -66,6 +82,41 @@ pub struct AutoTradeContract;
 
 #[contractimpl]
 impl AutoTradeContract {
+    /// Initialize the contract with an admin
+    pub fn initialize(env: Env, admin: Address) {
+        admin::init_admin(&env, admin);
+    }
+
+    /// Pause a category (admin only)
+    pub fn pause_category(
+        env: Env,
+        caller: Address,
+        category: String,
+        duration: Option<u64>,
+        reason: String,
+    ) -> Result<(), AutoTradeError> {
+        admin::pause_category(&env, &caller, category, duration, reason)
+    }
+
+    /// Unpause a category (admin only)
+    pub fn unpause_category(env: Env, caller: Address, category: String) -> Result<(), AutoTradeError> {
+        admin::unpause_category(&env, &caller, category)
+    }
+
+    /// Get current pause states
+    pub fn get_pause_states(env: Env) -> soroban_sdk::Map<String, PauseState> {
+        admin::get_pause_states(&env)
+    }
+
+    /// Set circuit breaker configuration (admin only)
+    pub fn set_circuit_breaker_config(
+        env: Env,
+        caller: Address,
+        config: stellar_swipe_common::emergency::CircuitBreakerConfig,
+    ) -> Result<(), AutoTradeError> {
+        admin::set_cb_config(&env, &caller, config)
+    }
+
     /// Execute a trade on behalf of a user based on a signal
     pub fn execute_trade(
         env: Env,
@@ -74,6 +125,11 @@ impl AutoTradeContract {
         order_type: OrderType,
         amount: i128,
     ) -> Result<TradeResult, AutoTradeError> {
+        // Check if trading is paused
+        if admin::is_paused(&env, String::from_str(&env, CAT_TRADING)) {
+            return Err(AutoTradeError::TradingPaused);
+        }
+
         if amount <= 0 {
             return Err(AutoTradeError::InvalidAmount);
         }
@@ -136,6 +192,14 @@ impl AutoTradeContract {
             TradeStatus::Filled
         };
 
+        // Update circuit breaker stats
+        admin::update_cb_stats(
+            &env,
+            status == TradeStatus::Failed,
+            execution.executed_amount,
+            execution.executed_price,
+        );
+
         let trade = Trade {
             signal_id,
             user: user.clone(),
@@ -177,6 +241,13 @@ impl AutoTradeContract {
             .set(&DataKey::Trades(user.clone(), signal_id), &trade);
 
         if execution.executed_amount > 0 {
+            // ── Referral fee split ────────────────────────────────────────────
+            // Platform fee = 7% of executed amount (0.7 XLM per 10 XLM trade).
+            // Referral reward = 10% of platform fee → deducted from platform share.
+            let platform_fee = execution.executed_amount * 7 / 100;
+            let referral_reward =
+                referral::process_referral_reward(&env, &user, signal.base_asset, platform_fee);
+
             let hist_status = match status {
                 TradeStatus::Filled | TradeStatus::PartiallyFilled => {
                     history::HistoryTradeStatus::Executed
@@ -191,7 +262,7 @@ impl AutoTradeContract {
                 signal.base_asset,
                 execution.executed_amount,
                 execution.executed_price,
-                0,
+                platform_fee - referral_reward,
                 hist_status,
             );
         }
@@ -270,6 +341,81 @@ impl AutoTradeContract {
         portfolio::get_portfolio(&env, &user)
     }
 
+    /// Set risk parity configuration
+    pub fn set_risk_parity_config(
+        env: Env,
+        user: Address,
+        enabled: bool,
+        rebalance_frequency_days: u32,
+        threshold_pct: u32,
+    ) -> Result<(), AutoTradeError> {
+        if !cfg!(test) {
+            user.require_auth();
+        }
+        let mut config = risk::get_risk_parity_config(&env, &user);
+        config.enabled = enabled;
+        config.rebalance_frequency_days = rebalance_frequency_days;
+        config.threshold_pct = threshold_pct;
+        risk::set_risk_parity_config(&env, &user, &config);
+        Ok(())
+    }
+
+    /// Get risk parity configuration
+    pub fn get_risk_parity_config(env: Env, user: Address) -> risk::RiskParityConfig {
+        risk::get_risk_parity_config(&env, &user)
+    }
+
+    /// Preview a risk parity rebalance
+    pub fn preview_risk_parity_rebalance(
+        env: Env,
+        user: Address,
+    ) -> Result<(Vec<AssetRisk>, Vec<RebalanceTrade>), AutoTradeError> {
+        risk_parity::calculate_risk_parity_rebalance(&env, &user)
+    }
+
+    /// Manually trigger a risk parity rebalance
+    pub fn trigger_risk_parity_rebalance(env: Env, user: Address) -> Result<(), AutoTradeError> {
+        if !cfg!(test) {
+            user.require_auth();
+        }
+        risk_parity::execute_risk_parity_rebalance(&env, &user)
+    }
+
+    /// Record a price for volatility tracking (usually called by oracle)
+    pub fn record_asset_price(env: Env, asset_id: u32, price: i128) {
+        risk::record_price(&env, asset_id, price);
+        risk::set_asset_price(&env, asset_id, price);
+    }
+
+    pub fn process_price_update(
+        env: Env,
+        user: Address,
+        asset_id: u32,
+        price: i128,
+    ) -> Option<AutoSellResult> {
+        let result = advanced_risk::process_price_update(&env, &user, asset_id, price);
+
+        if let Some(ref sell_result) = result {
+            let event_name = match sell_result.trigger {
+                advanced_risk::StopTrigger::TrailingStop => "trailing_stop_triggered",
+                advanced_risk::StopTrigger::FixedStopLoss => "stop_loss_triggered",
+            };
+
+            #[allow(deprecated)]
+            env.events().publish(
+                (Symbol::new(&env, event_name), user.clone(), asset_id),
+                sell_result.clone(),
+            );
+        }
+
+        result
+    }
+
+    pub fn get_trailing_stop_price(env: Env, user: Address, asset_id: u32) -> Option<i128> {
+        let config = risk::get_risk_config(&env, &user);
+        advanced_risk::get_trailing_stop_price(&env, &user, asset_id, &config)
+    }
+
     /// Grant authorization to execute trades
     pub fn grant_authorization(
         env: Env,
@@ -290,6 +436,7 @@ impl AutoTradeContract {
         auth::get_auth_config(&env, &user)
     }
 
+feature/mean-reversion-strategy
     // ── DCA ──────────────────────────────────────────────────────────────────
 
     pub fn create_dca(
@@ -424,6 +571,328 @@ impl AutoTradeContract {
     ) -> Result<(), AutoTradeError> {
         user.require_auth();
         strategies::mean_reversion::enable_mean_reversion_strategy(&env, strategy_id)
+=======
+    pub fn set_stat_arb_price_history(
+        env: Env,
+        asset_id: u32,
+        prices: soroban_sdk::Vec<i128>,
+    ) -> Result<(), AutoTradeError> {
+        strategies::stat_arb::set_price_history(&env, asset_id, prices)
+    }
+
+    pub fn get_stat_arb_price_history(env: Env, asset_id: u32) -> soroban_sdk::Vec<i128> {
+        strategies::stat_arb::get_price_history(&env, asset_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn configure_stat_arb_strategy(
+        env: Env,
+        user: Address,
+        asset_basket: soroban_sdk::Vec<u32>,
+        lookback_period_days: u32,
+        cointegration_threshold: i128,
+        entry_z_score: i128,
+        exit_z_score: i128,
+        rebalance_frequency_hours: u32,
+    ) -> Result<strategies::stat_arb::StatArbStrategy, AutoTradeError> {
+        user.require_auth();
+        let strategy = strategies::stat_arb::configure_strategy(
+            &env,
+            &user,
+            asset_basket,
+            lookback_period_days,
+            cointegration_threshold,
+            entry_z_score,
+            exit_z_score,
+            rebalance_frequency_hours,
+        )?;
+        strategies::stat_arb::emit_strategy_configured(&env, &user, &strategy);
+        Ok(strategy)
+    }
+
+    pub fn get_stat_arb_strategy(
+        env: Env,
+        user: Address,
+    ) -> Option<strategies::stat_arb::StatArbStrategy> {
+        strategies::stat_arb::get_strategy(&env, &user)
+    }
+
+    pub fn test_stat_arb_cointegration(
+        env: Env,
+        asset_basket: soroban_sdk::Vec<u32>,
+        lookback_period_days: u32,
+        cointegration_threshold: i128,
+    ) -> Result<strategies::stat_arb::CointegrationTest, AutoTradeError> {
+        strategies::stat_arb::test_cointegration_for_assets(
+            &env,
+            asset_basket,
+            lookback_period_days,
+            cointegration_threshold,
+        )
+    }
+
+    pub fn check_stat_arb_signal(
+        env: Env,
+        user: Address,
+    ) -> Result<strategies::stat_arb::StatArbSignal, AutoTradeError> {
+        strategies::stat_arb::check_stat_arb_signal(&env, &user)
+    }
+
+    pub fn execute_stat_arb_trade(
+        env: Env,
+        user: Address,
+        total_value: i128,
+    ) -> Result<strategies::stat_arb::StatArbPortfolio, AutoTradeError> {
+        user.require_auth();
+        let portfolio = strategies::stat_arb::execute_stat_arb_trade(&env, &user, total_value)?;
+        strategies::stat_arb::emit_trade_opened(&env, &user, &portfolio);
+        Ok(portfolio)
+    }
+
+    pub fn get_active_stat_arb_portfolio(
+        env: Env,
+        user: Address,
+    ) -> Option<strategies::stat_arb::StatArbPortfolio> {
+        strategies::stat_arb::get_active_portfolio(&env, &user)
+    }
+
+    pub fn rebalance_stat_arb_portfolio(
+        env: Env,
+        user: Address,
+    ) -> Result<strategies::stat_arb::StatArbPortfolio, AutoTradeError> {
+        user.require_auth();
+        let portfolio = strategies::stat_arb::rebalance_stat_arb_portfolio(&env, &user)?;
+        strategies::stat_arb::emit_rebalanced(&env, &user, &portfolio);
+        Ok(portfolio)
+    }
+
+    pub fn check_stat_arb_exit(
+        env: Env,
+        user: Address,
+    ) -> Result<strategies::stat_arb::StatArbExitCheck, AutoTradeError> {
+        strategies::stat_arb::check_stat_arb_exit(&env, &user)
+    }
+
+    pub fn close_stat_arb_portfolio(
+        env: Env,
+        user: Address,
+    ) -> Result<strategies::stat_arb::StatArbPortfolio, AutoTradeError> {
+        user.require_auth();
+        let exit_check = strategies::stat_arb::check_stat_arb_exit(&env, &user)?;
+        let reason = if exit_check.reason == strategies::stat_arb::StatArbExitReason::None {
+            strategies::stat_arb::StatArbExitReason::Converged
+        } else {
+            exit_check.reason.clone()
+        };
+        let portfolio = strategies::stat_arb::close_stat_arb_portfolio(&env, &user)?;
+        strategies::stat_arb::emit_closed(&env, &user, &portfolio, reason);
+        Ok(portfolio)
+    }
+
+    // ── Portfolio Insurance public API ────────────────────────────────────────
+
+    /// Configure portfolio insurance for the calling user.
+    pub fn configure_insurance(
+        env: Env,
+        user: Address,
+        enabled: bool,
+        max_drawdown_bps: u32,
+        hedge_ratio_bps: u32,
+        rebalance_threshold_bps: u32,
+    ) -> Result<(), AutoTradeError> {
+        user.require_auth();
+        portfolio_insurance::configure_insurance(
+            &env,
+            &user,
+            enabled,
+            max_drawdown_bps,
+            hedge_ratio_bps,
+            rebalance_threshold_bps,
+        )
+    }
+
+    /// Return current drawdown in basis points and update the high-water mark.
+    pub fn get_portfolio_drawdown(env: Env, user: Address) -> Result<i128, AutoTradeError> {
+        portfolio_insurance::calculate_drawdown(&env, &user)
+    }
+
+    /// Check drawdown and open hedge positions if the threshold is breached.
+    pub fn apply_hedge_if_needed(
+        env: Env,
+        user: Address,
+    ) -> Result<soroban_sdk::Vec<u32>, AutoTradeError> {
+        user.require_auth();
+        portfolio_insurance::check_and_apply_hedge(&env, &user)
+    }
+
+    /// Rebalance existing hedges to match the current portfolio size.
+    pub fn rebalance_hedges(
+        env: Env,
+        user: Address,
+    ) -> Result<soroban_sdk::Vec<u32>, AutoTradeError> {
+        user.require_auth();
+        portfolio_insurance::rebalance_hedges(&env, &user)
+    }
+
+    /// Close all hedges when the portfolio has recovered (drawdown < 5%).
+    pub fn remove_hedges_if_recovered(
+        env: Env,
+        user: Address,
+    ) -> Result<soroban_sdk::Vec<u32>, AutoTradeError> {
+        user.require_auth();
+        portfolio_insurance::remove_hedges_if_recovered(&env, &user)
+    }
+
+    /// Get the current insurance configuration for a user.
+    pub fn get_insurance_config(
+        env: Env,
+        user: Address,
+    ) -> Option<portfolio_insurance::PortfolioInsurance> {
+        portfolio_insurance::get_insurance(&env, &user)
+    }
+
+    // ── Grid Trading Strategy (Issue #104) ───────────────────────────────────
+
+    /// Initialise a grid strategy and return its id.
+    pub fn init_grid(
+        env: Env,
+        user: Address,
+        asset_pair: u32,
+        upper_price: i128,
+        lower_price: i128,
+        num_grids: u32,
+        total_capital: i128,
+    ) -> Result<u64, AutoTradeError> {
+        user.require_auth();
+        strategies::grid::initialize_grid_strategy(
+            &env,
+            user,
+            asset_pair,
+            upper_price,
+            lower_price,
+            num_grids,
+            total_capital,
+        )
+    }
+
+    /// Place limit orders across all grid levels.
+    pub fn place_grid_orders(env: Env, strategy_id: u64) -> Result<(), AutoTradeError> {
+        strategies::grid::place_grid_orders(&env, strategy_id)
+    }
+
+    /// Record a filled grid order and optionally rebalance.
+    pub fn grid_order_filled(
+        env: Env,
+        strategy_id: u64,
+        order_id: u64,
+        fill_price: i128,
+        fill_amount: i128,
+    ) -> Result<(), AutoTradeError> {
+        strategies::grid::on_grid_order_filled(&env, strategy_id, order_id, fill_price, fill_amount)
+    }
+
+    /// Shift the grid if price has moved outside the configured range.
+    pub fn adjust_grid(env: Env, strategy_id: u64) -> Result<(), AutoTradeError> {
+        strategies::grid::adjust_grid_to_price_movement(&env, strategy_id)
+    }
+
+    /// Return performance metrics for a grid strategy.
+    pub fn grid_performance(
+        env: Env,
+        strategy_id: u64,
+    ) -> Result<strategies::grid::GridPerformance, AutoTradeError> {
+        strategies::grid::calculate_grid_performance(&env, strategy_id)
+    }
+
+    // ── Pairs Trading Strategy (Issue #106) ───────────────────────────────────
+
+    pub fn configure_pairs_strategy(
+        env: Env,
+        user: Address,
+        asset_a: u32,
+        asset_b: u32,
+        lookback_period_days: u32,
+        entry_z_score: i128,
+        exit_z_score: i128,
+        position_size_pct: u32,
+    ) -> Result<u64, AutoTradeError> {
+        user.require_auth();
+        strategies::pairs_trading::configure_pairs_strategy(
+            &env,
+            user,
+            asset_a,
+            asset_b,
+            lookback_period_days,
+            entry_z_score,
+            exit_z_score,
+            position_size_pct,
+        )
+    }
+
+    pub fn get_pairs_trading_strategy(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+    ) -> Result<strategies::pairs_trading::PairsTradingStrategy, AutoTradeError> {
+        strategies::pairs_trading::get_pairs_trading_strategy(&env, &user, strategy_id)
+    }
+
+    pub fn analyze_asset_pair(
+        env: Env,
+        asset_a: u32,
+        asset_b: u32,
+        lookback_days: u32,
+    ) -> Result<strategies::pairs_trading::PairAnalysis, AutoTradeError> {
+        strategies::pairs_trading::analyze_asset_pair(&env, asset_a, asset_b, lookback_days)
+    }
+
+    pub fn check_pairs_trading_signal(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+    ) -> Result<Option<strategies::pairs_trading::PairsSignal>, AutoTradeError> {
+        strategies::pairs_trading::check_pairs_trading_signal(&env, &user, strategy_id)
+    }
+
+    pub fn execute_pairs_trade(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+        signal: strategies::pairs_trading::PairsSignal,
+        portfolio_value: i128,
+    ) -> Result<u64, AutoTradeError> {
+        user.require_auth();
+        strategies::pairs_trading::execute_pairs_trade(
+            &env,
+            &user,
+            strategy_id,
+            signal,
+            portfolio_value,
+        )
+    }
+
+    pub fn check_pairs_exit(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+    ) -> Result<Option<u64>, AutoTradeError> {
+        user.require_auth();
+        strategies::pairs_trading::check_pairs_exit(&env, &user, strategy_id)
+    }
+
+    pub fn calculate_optimal_hedge_ratio(
+        env: Env,
+        asset_a: u32,
+        asset_b: u32,
+        lookback_days: u32,
+    ) -> Result<i128, AutoTradeError> {
+        strategies::pairs_trading::calculate_optimal_hedge_ratio(
+            &env,
+            asset_a,
+            asset_b,
+            lookback_days,
+        )
+ main
     }
 }
 
