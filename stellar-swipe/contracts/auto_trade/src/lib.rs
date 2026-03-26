@@ -10,6 +10,7 @@ mod portfolio;
 mod risk;
 mod sdex;
 mod storage;
+mod strategies;
 
 use crate::storage::DataKey;
 use errors::AutoTradeError;
@@ -287,6 +288,67 @@ impl AutoTradeContract {
     /// Get authorization config
     pub fn get_auth_config(env: Env, user: Address) -> Option<auth::AuthConfig> {
         auth::get_auth_config(&env, &user)
+    }
+
+    // ── DCA ──────────────────────────────────────────────────────────────────
+
+    pub fn create_dca(
+        env: Env,
+        user: Address,
+        asset_pair: u32,
+        purchase_amount: i128,
+        frequency: strategies::dca::DCAFrequency,
+        duration_days: Option<u64>,
+    ) -> Result<u64, AutoTradeError> {
+        user.require_auth();
+        strategies::dca::create_dca_strategy(&env, user, asset_pair, purchase_amount, frequency, duration_days)
+    }
+
+    pub fn execute_due_dca(env: Env) -> soroban_sdk::Vec<u64> {
+        strategies::dca::execute_due_dca_purchases(&env)
+    }
+
+    pub fn execute_dca_purchase(env: Env, strategy_id: u64) -> Result<(), AutoTradeError> {
+        strategies::dca::execute_dca_purchase(&env, strategy_id)
+    }
+
+    pub fn pause_dca(env: Env, user: Address, strategy_id: u64) -> Result<(), AutoTradeError> {
+        user.require_auth();
+        strategies::dca::pause_dca_strategy(&env, strategy_id)
+    }
+
+    pub fn resume_dca(env: Env, user: Address, strategy_id: u64) -> Result<(), AutoTradeError> {
+        user.require_auth();
+        strategies::dca::resume_dca_strategy(&env, strategy_id)
+    }
+
+    pub fn update_dca(
+        env: Env,
+        user: Address,
+        strategy_id: u64,
+        new_amount: Option<i128>,
+        new_frequency: Option<strategies::dca::DCAFrequency>,
+    ) -> Result<(), AutoTradeError> {
+        user.require_auth();
+        strategies::dca::update_dca_schedule(&env, strategy_id, new_amount, new_frequency)
+    }
+
+    pub fn handle_missed_dca(env: Env, strategy_id: u64) -> Result<u32, AutoTradeError> {
+        strategies::dca::handle_missed_dca_purchases(&env, strategy_id)
+    }
+
+    pub fn get_dca_strategy(
+        env: Env,
+        strategy_id: u64,
+    ) -> Result<strategies::dca::DCAStrategy, AutoTradeError> {
+        strategies::dca::get_dca_strategy(&env, strategy_id)
+    }
+
+    pub fn analyze_dca(
+        env: Env,
+        strategy_id: u64,
+    ) -> Result<strategies::dca::DCAPerformance, AutoTradeError> {
+        strategies::dca::analyze_dca_performance(&env, strategy_id)
     }
 }
 
