@@ -1,5 +1,5 @@
+use crate::types::{Signal, SignalStatus, SignalSummary, SortOption};
 use soroban_sdk::{Address, Env, Map, Vec};
-use crate::types::{Signal, SignalStatus, SortOption, SignalSummary};
 
 const MAX_LIMIT: u32 = 50;
 const DEFAULT_LIMIT: u32 = 20;
@@ -104,7 +104,7 @@ pub fn get_active_signals(
     // 3. Paginate
     let mut results = Vec::new(env);
     let end = (offset + actual_limit).min(total_active);
-    
+
     for i in offset..end {
         let signal = active_signals.get(i).unwrap();
         let success_rate = if signal.executions > 0 {

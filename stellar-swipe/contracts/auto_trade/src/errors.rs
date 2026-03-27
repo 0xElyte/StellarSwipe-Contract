@@ -1,6 +1,5 @@
 use soroban_sdk::contracterror;
 
-#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum AutoTradeError {
@@ -12,14 +11,81 @@ pub enum AutoTradeError {
     InsufficientLiquidity = 6,
     DailyTradeLimitExceeded = 7,
     PositionLimitExceeded = 8,
-    StopLossTriggered = 9,
-    // Rate limit errors
-    RateLimitPenalty = 10,
-    BelowMinTransfer = 11,
-    CooldownNotElapsed = 12,
-    HourlyTransferLimitExceeded = 13,
-    HourlyVolumeLimitExceeded = 14,
-    DailyTransferLimitExceeded = 15,
-    DailyVolumeLimitExceeded = 16,
-    GlobalCapacityExceeded = 17,
+    StopLossTriggered = 9, feature/mean-reversion-strategy
+ feature/mean-reversion-strategy
+    DcaStrategyNotFound = 10,
+    DcaStrategyInactive = 11,
+    DcaEndTimeReached = 12,
+    MrStrategyNotFound = 13,
+    MrInsufficientHistory = 14,
+    MrLowVolatility = 15,
+
+feature/dca-strategy
+    DcaStrategyNotFound = 10,
+    DcaStrategyInactive = 11,
+    DcaEndTimeReached = 12,
+ main
+
+    TradingPaused = 10,
+
+    StrategyNotFound = 11,
+    PositionAlreadyExists = 12,
+    RankingDisabled = 13,
+
+    InvalidBasketSize = 14,
+    InsufficientPriceHistory = 15,
+    InvalidPriceData = 16,
+    NonCointegratedBasket = 17,
+    ActivePortfolioExists = 18,
+    NoActivePortfolio = 19,
+    NoTradeSignal = 20,
+    InvalidStatArbConfig = 21,
+    
+    // Pairs Trading
+    PairsStrategyNotFound = 22,
+    PairsActivePositionExists = 23,
+    PairsNoActivePosition = 24,
+    InsufficientCorrelation = 25,
+    PairNotCointegrated = 26,
+    InvalidPairsConfig = 27,
+ 
+ main
+    // Arbitrage
+    ArbitrageOpportunityExpired = 28,
+    ArbitrageUnprofitable = 29,
+    ArbTooLarge = 30,
+    FrontRunningRisk = 31,
+
+    // Insurance
+    InvalidInsuranceConfig = 32,
+    InsuranceNotConfigured = 33,
+
+    // Referral
+    SelfReferral = 34,
+    ReferralAlreadySet = 35,
+    CircularReferral = 36,
+    ReferralLimitExceeded = 37,
+
+ TWAP-Orders
+    // TWAP
+    InvalidTWAPDuration = 38,
+    TWAPOrderNotFound = 39,
+    NotTWAPOwner = 40,
+    TWAPNotActive = 41,
+
+Correlation-Based-Risk
+    // Correlation
+    CorrelationLimitExceeded = 42,
+    TooManyCorrelatedPositions = 43,
+
+    // Conditional Orders
+    ConditionalOrderNotFound = 44,
+    ConditionalOrderNotPending = 45,
+    ConditionalOrderNotTriggered = 46,
+    InvalidConditionalConfig = 47,
+
+ main
+ main
+main
+ main
 }
