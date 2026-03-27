@@ -1,8 +1,9 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol};
 
 mod auth;
+mod emergency;
 mod errors;
 mod history;
 mod multi_asset;
@@ -352,6 +353,75 @@ impl AutoTradeContract {
     /// Get authorization config
     pub fn get_auth_config(env: Env, user: Address) -> Option<auth::AuthConfig> {
         auth::get_auth_config(&env, &user)
+    }
+
+    // ── Emergency Pause ──────────────────────────────────────────────────────
+
+    /// Set the emergency admin (call once at deploy time).
+    pub fn init_emergency_admin(env: Env, admin: Address) {
+        admin.require_auth();
+        emergency::set_emergency_admin(&env, &admin);
+    }
+
+    /// Immediately pause the bridge (admin only).
+    pub fn emergency_pause(
+        env: Env,
+        caller: Address,
+        pause_type: emergency::PauseType,
+        reason: String,
+    ) -> Result<(), AutoTradeError> {
+        caller.require_auth();
+        emergency::emergency_pause(&env, &caller, pause_type, reason)
+    }
+
+    /// Schedule an automatic unpause after `seconds` seconds.
+    pub fn set_auto_unpause(
+        env: Env,
+        caller: Address,
+        seconds: u64,
+    ) -> Result<(), AutoTradeError> {
+        caller.require_auth();
+        emergency::set_auto_unpause(&env, &caller, seconds)
+    }
+
+    /// Begin the recovery process — returns a recovery_id.
+    pub fn initiate_recovery(env: Env, caller: Address) -> Result<u64, AutoTradeError> {
+        caller.require_auth();
+        emergency::initiate_recovery(&env, &caller)
+    }
+
+    /// Mark one recovery check as done (0-indexed).
+    pub fn complete_recovery_check(
+        env: Env,
+        recovery_id: u64,
+        check_index: u32,
+        verifier: Address,
+    ) -> Result<(), AutoTradeError> {
+        verifier.require_auth();
+        emergency::complete_recovery_check(&env, recovery_id, check_index, &verifier)
+    }
+
+    /// Unpause after all recovery checks are complete.
+    pub fn unpause_bridge(
+        env: Env,
+        caller: Address,
+        recovery_id: u64,
+    ) -> Result<(), AutoTradeError> {
+        caller.require_auth();
+        emergency::unpause_bridge(&env, &caller, recovery_id)
+    }
+
+    /// Query current pause state.
+    pub fn get_pause_status(env: Env) -> emergency::PauseState {
+        emergency::get_pause_status(&env)
+    }
+
+    /// Query a recovery checklist.
+    pub fn get_recovery_checklist(
+        env: Env,
+        recovery_id: u64,
+    ) -> Option<emergency::RecoveryChecklist> {
+        emergency::get_recovery_checklist(&env, recovery_id)
     }
 }
 

@@ -1281,3 +1281,468 @@ mod rate_limit_tests {
         });
     }
 }
+
+// ========================================
+// Emergency Pause Tests
+// ========================================
+
+mod emergency_tests {
+    use super::*;
+    use crate::emergency::{BridgeOperation, PauseType};
+    use soroban_sdk::{String, testutils::Address as _};
+
+    fn setup_emergency(env: &Env) -> (soroban_sdk::Address, soroban_sdk::Address) {
+        let contract_id = env.register(AutoTradeContract, ());
+        let admin = soroban_sdk::Address::generate(env);
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::init_emergency_admin(env.clone(), admin.clone());
+        });
+        (contract_id, admin)
+    }
+
+    fn reason(env: &Env, s: &str) -> String {
+        String::from_str(env, s)
+    }
+
+    // ── Pause ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_full_pause_blocks_all_ops() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "exploit detected"),
+            )
+            .unwrap();
+
+            let state = AutoTradeContract::get_pause_status(env.clone());
+            assert!(state.is_paused);
+            assert_eq!(state.pause_type, PauseType::FullPause);
+            assert_eq!(state.paused_by, admin);
+        });
+    }
+
+    #[test]
+    fn test_deposits_only_pause() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::DepositsOnly,
+                reason(&env, "deposit bug"),
+            )
+            .unwrap();
+
+            // Deposits blocked
+            let res = crate::emergency::enforce_pause(&env, &BridgeOperation::InitiateTransfer);
+            assert_eq!(res, Err(AutoTradeError::BridgePaused));
+
+            // Withdrawals still allowed
+            let res = crate::emergency::enforce_pause(&env, &BridgeOperation::InitiateWithdrawal);
+            assert!(res.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_withdrawals_only_pause() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::WithdrawalsOnly,
+                reason(&env, "withdrawal bug"),
+            )
+            .unwrap();
+
+            let res = crate::emergency::enforce_pause(&env, &BridgeOperation::InitiateWithdrawal);
+            assert_eq!(res, Err(AutoTradeError::BridgePaused));
+
+            let res = crate::emergency::enforce_pause(&env, &BridgeOperation::InitiateTransfer);
+            assert!(res.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_validation_only_pause() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::ValidationOnly,
+                reason(&env, "validator compromise"),
+            )
+            .unwrap();
+
+            let res = crate::emergency::enforce_pause(&env, &BridgeOperation::ValidatorSign);
+            assert_eq!(res, Err(AutoTradeError::BridgePaused));
+
+            let res = crate::emergency::enforce_pause(&env, &BridgeOperation::Other);
+            assert!(res.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_unauthorized_pause_rejected() {
+        let env = setup_env();
+        let (contract_id, _admin) = setup_emergency(&env);
+        let attacker = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let res = AutoTradeContract::emergency_pause(
+                env.clone(),
+                attacker.clone(),
+                PauseType::FullPause,
+                reason(&env, "malicious"),
+            );
+            assert_eq!(res, Err(AutoTradeError::Unauthorized));
+        });
+    }
+
+    #[test]
+    fn test_second_pause_request_ignored_first_wins() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::DepositsOnly,
+                reason(&env, "first"),
+            )
+            .unwrap();
+
+            // Second call with different type — should succeed (no error) but first type wins
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "second"),
+            )
+            .unwrap();
+
+            let state = AutoTradeContract::get_pause_status(env.clone());
+            assert_eq!(state.pause_type, PauseType::DepositsOnly); // first wins
+        });
+    }
+
+    // ── Pending transfers during pause ───────────────────────────────────────
+
+    #[test]
+    fn test_pending_transfers_can_complete_during_pause() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+        let user = soroban_sdk::Address::generate(&env);
+        let signal_id = 10u64;
+
+        env.as_contract(&contract_id, || {
+            storage::set_signal(
+                &env,
+                signal_id,
+                &storage::Signal {
+                    signal_id,
+                    price: 100,
+                    expiry: env.ledger().timestamp() + 10_000,
+                    base_asset: 1,
+                },
+            );
+            storage::authorize_user(&env, &user);
+            env.storage()
+                .temporary()
+                .set(&(user.clone(), soroban_sdk::symbol_short!("balance")), &1000i128);
+            env.storage()
+                .temporary()
+                .set(&(soroban_sdk::symbol_short!("liquidity"), signal_id), &1000i128);
+
+            // Execute trade BEFORE pause — simulates a pending/in-flight transfer
+            AutoTradeContract::execute_trade(
+                env.clone(),
+                user.clone(),
+                signal_id,
+                OrderType::Market,
+                100,
+            )
+            .unwrap();
+
+            // Now pause
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "exploit"),
+            )
+            .unwrap();
+
+            // The already-recorded trade is still readable (not wiped)
+            let trade = AutoTradeContract::get_trade(env.clone(), user.clone(), signal_id);
+            assert!(trade.is_some());
+            assert_eq!(trade.unwrap().executed_amount, 100);
+        });
+    }
+
+    // ── Recovery ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_full_recovery_flow() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            // 1. Pause
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "bug"),
+            )
+            .unwrap();
+
+            // 2. Initiate recovery
+            let recovery_id =
+                AutoTradeContract::initiate_recovery(env.clone(), admin.clone()).unwrap();
+            assert_eq!(recovery_id, 1);
+
+            // 3. Complete all 5 checks
+            for i in 0..5u32 {
+                AutoTradeContract::complete_recovery_check(
+                    env.clone(),
+                    recovery_id,
+                    i,
+                    admin.clone(),
+                )
+                .unwrap();
+            }
+
+            let checklist =
+                AutoTradeContract::get_recovery_checklist(env.clone(), recovery_id).unwrap();
+            assert!(checklist.all_checks_complete);
+
+            // 4. Unpause
+            AutoTradeContract::unpause_bridge(env.clone(), admin.clone(), recovery_id).unwrap();
+
+            let state = AutoTradeContract::get_pause_status(env.clone());
+            assert!(!state.is_paused);
+        });
+    }
+
+    #[test]
+    fn test_unpause_blocked_if_checks_incomplete() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "bug"),
+            )
+            .unwrap();
+
+            let recovery_id =
+                AutoTradeContract::initiate_recovery(env.clone(), admin.clone()).unwrap();
+
+            // Only complete 3 of 5 checks
+            for i in 0..3u32 {
+                AutoTradeContract::complete_recovery_check(
+                    env.clone(),
+                    recovery_id,
+                    i,
+                    admin.clone(),
+                )
+                .unwrap();
+            }
+
+            let res =
+                AutoTradeContract::unpause_bridge(env.clone(), admin.clone(), recovery_id);
+            assert_eq!(res, Err(AutoTradeError::RecoveryIncomplete));
+        });
+    }
+
+    #[test]
+    fn test_recovery_not_found() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "bug"),
+            )
+            .unwrap();
+
+            let res = AutoTradeContract::unpause_bridge(env.clone(), admin.clone(), 999);
+            assert_eq!(res, Err(AutoTradeError::RecoveryNotFound));
+        });
+    }
+
+    #[test]
+    fn test_initiate_recovery_requires_paused_state() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            let res = AutoTradeContract::initiate_recovery(env.clone(), admin.clone());
+            assert_eq!(res, Err(AutoTradeError::NotPaused));
+        });
+    }
+
+    // ── Auto-Unpause ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_auto_unpause_triggers_on_time() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "temp"),
+            )
+            .unwrap();
+
+            AutoTradeContract::set_auto_unpause(env.clone(), admin.clone(), 300).unwrap();
+
+            // Before time — still blocked
+            let res = crate::emergency::enforce_pause(&env, &BridgeOperation::Other);
+            assert_eq!(res, Err(AutoTradeError::BridgePaused));
+        });
+
+        // Advance time past auto-unpause
+        env.ledger().set_timestamp(1000 + 301);
+
+        env.as_contract(&contract_id, || {
+            // enforce_pause should auto-unpause and return Ok
+            let res = crate::emergency::enforce_pause(&env, &BridgeOperation::Other);
+            assert!(res.is_ok());
+
+            let state = AutoTradeContract::get_pause_status(env.clone());
+            assert!(!state.is_paused);
+        });
+    }
+
+    #[test]
+    fn test_auto_unpause_requires_paused() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            let res = AutoTradeContract::set_auto_unpause(env.clone(), admin.clone(), 60);
+            assert_eq!(res, Err(AutoTradeError::NotPaused));
+        });
+    }
+
+    #[test]
+    fn test_manual_unpause_after_auto_unpause_scheduled() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "temp"),
+            )
+            .unwrap();
+
+            // Schedule auto-unpause in 600s
+            AutoTradeContract::set_auto_unpause(env.clone(), admin.clone(), 600).unwrap();
+
+            // Manual recovery takes precedence — complete all checks and unpause now
+            let recovery_id =
+                AutoTradeContract::initiate_recovery(env.clone(), admin.clone()).unwrap();
+            for i in 0..5u32 {
+                AutoTradeContract::complete_recovery_check(
+                    env.clone(),
+                    recovery_id,
+                    i,
+                    admin.clone(),
+                )
+                .unwrap();
+            }
+            AutoTradeContract::unpause_bridge(env.clone(), admin.clone(), recovery_id).unwrap();
+
+            let state = AutoTradeContract::get_pause_status(env.clone());
+            assert!(!state.is_paused);
+            assert_eq!(state.auto_unpause_at, 0); // cleared
+        });
+    }
+
+    // ── Audit trail ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pause_state_records_pauser_and_reason() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "critical exploit CVE-2025-001"),
+            )
+            .unwrap();
+
+            let state = AutoTradeContract::get_pause_status(env.clone());
+            assert_eq!(state.paused_by, admin);
+            assert_eq!(state.paused_at, 1000);
+            assert_eq!(
+                state.pause_reason,
+                String::from_str(&env, "critical exploit CVE-2025-001")
+            );
+        });
+    }
+
+    #[test]
+    fn test_recovery_checklist_records_verifier() {
+        let env = setup_env();
+        let (contract_id, admin) = setup_emergency(&env);
+
+        env.as_contract(&contract_id, || {
+            AutoTradeContract::emergency_pause(
+                env.clone(),
+                admin.clone(),
+                PauseType::FullPause,
+                reason(&env, "bug"),
+            )
+            .unwrap();
+
+            let recovery_id =
+                AutoTradeContract::initiate_recovery(env.clone(), admin.clone()).unwrap();
+
+            AutoTradeContract::complete_recovery_check(
+                env.clone(),
+                recovery_id,
+                0,
+                admin.clone(),
+            )
+            .unwrap();
+
+            let checklist =
+                AutoTradeContract::get_recovery_checklist(env.clone(), recovery_id).unwrap();
+            let check = checklist.checks.get(0).unwrap();
+            assert!(check.completed);
+            assert_eq!(check.verified_by, admin);
+        });
+    }
+}

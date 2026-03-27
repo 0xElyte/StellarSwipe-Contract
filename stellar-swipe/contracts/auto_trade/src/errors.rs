@@ -22,4 +22,9 @@ pub enum AutoTradeError {
     DailyTransferLimitExceeded = 15,
     DailyVolumeLimitExceeded = 16,
     GlobalCapacityExceeded = 17,
+    // Emergency pause errors
+    BridgePaused = 18,
+    NotPaused = 19,
+    RecoveryNotFound = 20,
+    RecoveryIncomplete = 21,
 }
