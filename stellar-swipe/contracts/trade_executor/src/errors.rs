@@ -5,6 +5,10 @@ use soroban_sdk::contracterror;
 #[repr(u32)]
 pub enum ContractError {
     NotInitialized = 1,
+feature/position-limit-copy-trade
+    PositionLimitReached = 2,
+
     InvalidAmount = 2,
     SlippageExceeded = 3,
+main
 }
