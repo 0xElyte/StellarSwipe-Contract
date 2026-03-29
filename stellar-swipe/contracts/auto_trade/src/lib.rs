@@ -27,7 +27,8 @@ mod twap;
 use crate::storage::DataKey;
 use advanced_risk::AutoSellResult;
 use errors::AutoTradeError;
-use stellar_swipe_common::emergency::{CAT_TRADING, PauseState};
+use stellar_swipe_common::emergency::{CAT_ALL, CAT_TRADING, PauseState};
+use stellar_swipe_common::{health_uninitialized, HealthStatus};
 
 use risk_parity::{AssetRisk, RebalanceTrade};
 
